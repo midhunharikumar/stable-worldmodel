@@ -255,14 +255,15 @@ Environments are pulled from the [DeepMind Control Suite](https://github.com/goo
 
 ## Command-Line Interface
 
-After installation, the `swm` command is available for inspecting datasets, environments, and checkpoints without writing code:
+After installation, the `swm` command is available for inspecting/converting datasets, environments, and checkpoints without writing code:
 
 ```bash
-swm datasets                    # list cached datasets
-swm inspect pusht_expert_train  # inspect a specific dataset
-swm envs                        # list all registered environments
-swm fovs PushT-v1               # show factors of variation for an environment
-swm checkpoints                 # list available model checkpoints
+swm datasets                                        # list cached datasets
+swm inspect pusht_expert_train                      # inspect a specific dataset
+swm envs                                            # list all registered environments
+swm fovs PushT-v1                                   # show factors of variation for an environment
+swm checkpoints                                     # list available model checkpoints
+swm convert pusht_expert_train --dest-format video  # convert a dataset to another format
 ```
 
 ## Documentation

@@ -1,5 +1,4 @@
 import os
-from collections import OrderedDict
 from pathlib import Path
 
 import hydra
@@ -14,66 +13,9 @@ from stable_worldmodel.wm.utils import save_pretrained
 from lightning.pytorch.loggers import WandbLogger
 from loguru import logger as logging
 from omegaconf import OmegaConf, open_dict
-from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
-from transformers import (
-    AutoModel,
-    AutoModelForImageClassification,
-    AutoVideoProcessor,
-)
-
-# fmt: off
-ENCODER_CONFIGS = {
-    'resnet': {
-        'prefix': 'microsoft/resnet-',
-        'model_class': AutoModelForImageClassification,
-        'embedding_attr': lambda m: m.config.hidden_sizes[-1],
-        'post_init': lambda m: setattr(m.classifier, '1', nn.LayerNorm(m.config.hidden_sizes[-1])),
-        'interpolate_pos_encoding': False,
-    },
-    'vit':    {'prefix': 'google/vit-'},
-    'dino':   {'prefix': 'facebook/dino-'},
-    'dinov2':  {'prefix': 'facebook/dinov2-'},
-    'dinov3':  {'prefix': 'facebook/dinov3-'},
-    'webssl':  {'prefix': 'facebook/webssl-'},
-    'mae':    {'prefix': 'facebook/vit-mae-'},
-    'ijepa':  {'prefix': 'facebook/ijepa'},
-    'vjepa2':  {'prefix': 'facebook/vjepa2-vit'},
-    'siglip2': {'prefix': 'google/siglip2-'},
-}
-# fmt: on
-
-
-def get_encoder(cfg):
-    """Load a pretrained vision encoder and return (backbone, embed_dim, num_patches, interp_pos_enc)."""
-    encoder_cfg = next(
-        (
-            c
-            for c in ENCODER_CONFIGS.values()
-            if cfg.backbone.name.startswith(c['prefix'])
-        ),
-        None,
-    )
-    if encoder_cfg is None:
-        raise ValueError(f'Unsupported backbone: {cfg.backbone.name}')
-
-    backbone = encoder_cfg.get('model_class', AutoModel).from_pretrained(
-        cfg.backbone.name
-    )
-    if hasattr(backbone, 'vision_model'):  # CLIP-style
-        backbone = backbone.vision_model
-    if 'post_init' in encoder_cfg:
-        encoder_cfg['post_init'](backbone)
-
-    embed_dim = encoder_cfg.get(
-        'embedding_attr', lambda m: m.config.hidden_size
-    )(backbone)
-    is_cnn = cfg.backbone.name.startswith('microsoft/resnet-')
-    num_patches = 1 if is_cnn else (cfg.image_size // cfg.patch_size) ** 2
-    interp_pos_enc = encoder_cfg.get('interpolate_pos_encoding', True)
-
-    return backbone, embed_dim, num_patches, interp_pos_enc
+from transformers import AutoVideoProcessor
 
 
 # ---------------------------------------------------------------------------
@@ -292,40 +234,38 @@ def run(cfg):
     )
 
     # --- Model ---
-    encoder, embed_dim, num_patches, interp_pos_enc = get_encoder(cfg)
+    encoder = hydra.utils.instantiate(cfg.model.encoder)
+    encoder.eval()
+    encoder.requires_grad_(False)
+
+    is_cnn = hasattr(encoder.config, 'hidden_sizes')
+    embed_dim = (
+        encoder.config.hidden_sizes[-1]
+        if is_cnn
+        else encoder.config.hidden_size
+    )
+    num_patches = 1 if is_cnn else (cfg.image_size // cfg.patch_size) ** 2
     embed_dim += sum(cfg.wm.get('encoding', {}).values())
 
     if cfg.backbone.get('is_video_encoder', False):
         num_patches += num_patches * (cfg.n_steps // 4)
 
-    predictor_kwargs = {k: v for k, v in cfg.predictor.items() if k != 'size'}
-    predictor = swm.wm.prejepa.CausalPredictor(
-        num_patches=num_patches,
-        num_frames=cfg.wm.history_size,
-        dim=embed_dim,
-        **predictor_kwargs,
-    )
+    with open_dict(cfg):
+        cfg.model.predictor.dim = embed_dim
+        cfg.model.predictor.num_patches = num_patches
+        cfg.model.extra_encoders = {
+            '_target_': 'torch.nn.ModuleDict',
+            'modules': {
+                key: {
+                    '_target_': 'stable_worldmodel.wm.prejepa.module.Embedder',
+                    'in_chans': cfg.extra_dims[key],
+                    'emb_dim': int(cfg.wm.encoding[key]),
+                }
+                for key in cfg.wm.get('encoding', {})
+            },
+        }
 
-    extra_encoders = nn.ModuleDict(
-        OrderedDict(
-            (
-                key,
-                swm.wm.prejepa.Embedder(
-                    in_chans=cfg.extra_dims[key], emb_dim=emb_dim
-                ),
-            )
-            for key, emb_dim in cfg.wm.get('encoding', {}).items()
-        )
-    )
-
-    world_model = swm.wm.PreJEPA(
-        encoder=spt.backbone.EvalOnly(encoder),
-        predictor=predictor,
-        extra_encoders=extra_encoders,
-        history_size=cfg.wm.history_size,
-        num_pred=cfg.wm.num_preds,
-        interpolate_pos_encoding=interp_pos_enc,
-    )
+    world_model = hydra.utils.instantiate(cfg.model, encoder=encoder)
 
     world_model = spt.Module(
         model=world_model,
@@ -357,7 +297,7 @@ def run(cfg):
             spt.callbacks.CPUOffloadCallback(),
             SaveCkptCallback(
                 run_name=cfg.output_model_name,
-                cfg=cfg,
+                cfg=cfg.model,
                 epoch_interval=5,
             ),
             pl.pytorch.callbacks.LearningRateMonitor(logging_interval='step'),
