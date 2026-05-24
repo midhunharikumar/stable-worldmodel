@@ -56,8 +56,11 @@ from ..wrapper import MegaWrapper
 RESET_MODES = ('auto', 'wait')
 
 
-def _make_env(env_name, max_episode_steps, wrappers, **kwargs):
-    kwargs.setdefault('render_mode', 'rgb_array')
+def _make_env(
+    env_name, max_episode_steps, wrappers, add_pixels=True, **kwargs
+):
+    if add_pixels:
+        kwargs.setdefault('render_mode', 'rgb_array')
     env = gym.make(env_name, max_episode_steps=max_episode_steps, **kwargs)
     for wrapper in wrappers:
         env = wrapper(env)
@@ -83,6 +86,7 @@ class World:
             (e.g. ``'swm/PushT-v1'``).
         num_envs: Number of parallel envs in the pool.
         image_shape: ``(H, W)`` that pixels/goal are resized to.
+            Required unless ``add_pixels=False``.
         max_episode_steps: Per-env step cap before truncation.
         goal_conditioned: If True, the goal key is kept separate from
             regular observations (controls ``MegaWrapper.separate_goal``).
@@ -100,6 +104,10 @@ class World:
         image_resample: PIL resample mode for pixel/goal resizing
             (``'nearest'``, ``'bilinear'``, ...). Defaults to bilinear;
             use ``'nearest'`` for crisp pixel-art envs (e.g. Craftax).
+        add_pixels: If True (default), render each env and add a resized
+            ``pixels`` observation; goal images are resized too. Set False
+            for envs without pixels (e.g. audio): ``image_shape`` may then
+            be omitted and the raw observation is lifted into info as-is.
         **kwargs: Forwarded to ``gym.make`` (e.g. ``render_mode``).
     """
 
@@ -107,7 +115,7 @@ class World:
         self,
         env_name: str,
         num_envs: int,
-        image_shape: tuple[int, int],
+        image_shape: tuple[int, int] | None = None,
         max_episode_steps: int = 100,
         goal_conditioned: bool = True,
         pre_wrappers: list | None = None,
@@ -115,8 +123,11 @@ class World:
         image_transform: Callable | None = None,
         goal_transform: Callable | None = None,
         image_resample: str | int | None = None,
+        add_pixels: bool = True,
         **kwargs: Any,
     ):
+        if add_pixels and image_shape is None:
+            raise ValueError('image_shape is required when add_pixels=True.')
         wrappers = [
             *(pre_wrappers or []),
             partial(
@@ -126,11 +137,17 @@ class World:
                 goal_transform=goal_transform,
                 separate_goal=goal_conditioned,
                 image_resample=image_resample,
+                add_pixels=add_pixels,
             ),
             *(extra_wrappers or []),
         ]
         env_fn = partial(
-            _make_env, env_name, max_episode_steps, wrappers, **kwargs
+            _make_env,
+            env_name,
+            max_episode_steps,
+            wrappers,
+            add_pixels=add_pixels,
+            **kwargs,
         )
         self.envs = EnvPool([env_fn] * num_envs)
         self.policy: Policy | None = None
@@ -245,6 +262,7 @@ class World:
         options: dict | None = None,
         format: str = 'lance',
         writer: Any = None,
+        progress: bool = True,
     ) -> None:
         """Roll out ``episodes`` and dump their trajectories.
 
@@ -271,6 +289,7 @@ class World:
                 :func:`stable_worldmodel.data.register_format`.
             writer: A pre-built writer (e.g. ``ReplayBuffer``) to fill
                 directly. Mutually exclusive with ``path``.
+            progress: Whether to show the ``Recording`` progress bar.
         """
         from tqdm import tqdm
 
@@ -309,7 +328,9 @@ class World:
 
         with (
             writer_cm as w,
-            tqdm(total=episodes, desc='Recording') as pbar,
+            tqdm(
+                total=episodes, desc='Recording', disable=not progress
+            ) as pbar,
         ):
 
             def episode_iter():
@@ -394,12 +415,18 @@ class World:
             if not done.any():
                 continue
 
+            budget_reached = False
             for i in np.where(done)[0]:
                 yield int(i), ep_count
                 ep_count += 1
                 if episodes is not None and ep_count >= episodes:
-                    return
+                    budget_reached = True
+                    break
 
+            # Always reset the done envs before stopping. Returning straight
+            # from the loop above would leave the env that completed the final
+            # episode in its terminal state, so the next _run_iter/collect call
+            # steps a dead env and records a spurious length-1 episode.
             if mode == 'auto':
                 seeds = [None] * self.num_envs
                 if next_seed is not None:
@@ -414,8 +441,9 @@ class World:
                 self.infos['_needs_flush'] = done
             elif mode == 'wait':
                 alive[done] = False
-                if not alive.any():
-                    return
+
+            if budget_reached or (mode == 'wait' and not alive.any()):
+                return
 
     def _get_actions(self) -> np.ndarray:
         return self.policy.get_action(self.infos)
