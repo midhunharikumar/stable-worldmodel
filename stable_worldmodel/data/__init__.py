@@ -31,6 +31,7 @@ from . import formats as _formats  # noqa: F401
 from .formats.lance import LanceDataset, LanceWriter
 from .formats.folder import FolderDataset, FolderWriter, ImageDataset
 from .formats.lerobot import LeRobotAdapter
+from .formats.parquet import ParquetDataset, ParquetWriter
 
 try:
     from .formats.hdf5 import HDF5Dataset, HDF5Writer  # noqa: F401
@@ -53,6 +54,8 @@ __all__ = [
     'LanceDataset',
     'LanceWriter',
     'LeRobotAdapter',
+    'ParquetDataset',
+    'ParquetWriter',
     'PercentileScaler',
     'ReplayBuffer',
     'WRITE_MODES',

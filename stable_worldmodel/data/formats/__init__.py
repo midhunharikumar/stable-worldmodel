@@ -13,6 +13,7 @@ import logging as _logging
 from . import lance  # noqa: F401
 from . import folder  # noqa: F401
 from . import lerobot  # noqa: F401
+from . import parquet  # noqa: F401
 
 
 def _try_import(modname: str) -> None:

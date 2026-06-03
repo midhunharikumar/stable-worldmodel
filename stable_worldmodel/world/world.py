@@ -48,10 +48,9 @@ import torch
 
 from stable_worldmodel.policy import Policy
 
-from .env_pool import EnvPool
 from ..plot import save_panel_videos, save_video
 from ..wrapper import MegaWrapper
-
+from .env_pool import EnvPool
 
 RESET_MODES = ('auto', 'wait')
 
@@ -301,6 +300,7 @@ class World:
             )
 
         if writer is None:
+            print(f'Using {writer} write')
             writer_cm = get_format(format).open_writer(path)
         else:
             writer_cm = writer
